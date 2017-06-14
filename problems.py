@@ -21,6 +21,12 @@ from __future__ import print_function
 import os
 import tarfile
 import sys
+import json
+import numpy
+from sklearn import preprocessing
+
+from sklearn.feature_extraction.text import TfidfVectorizer
+from sklearn.feature_extraction.text import CountVectorizer
 
 from six.moves import urllib
 from six.moves import xrange  # pylint: disable=redefined-builtin
@@ -37,18 +43,18 @@ _nn_initializers = {
 
 
 def simple():
-  """Simple problem: f(x) = x^2."""
+    """Simple problem: f(x) = x^2."""
 
-  def build():
-    """Builds loss graph."""
-    x = tf.get_variable(
-        "x",
-        shape=[],
-        dtype=tf.float32,
-        initializer=tf.ones_initializer())
-    return tf.square(x, name="x_squared")
+    def build():
+      """Builds loss graph."""
+      x = tf.get_variable(
+          "x",
+          shape=[],
+          dtype=tf.float32,
+          initializer=tf.ones_initializer())
+      return tf.square(x, name="x_squared")
 
-  return build
+    return build
 
 
 def simple_multi_optimizer(num_dims=2):
@@ -137,6 +143,91 @@ def _xent_loss(output, labels):
                                                         labels=labels)
   return tf.reduce_mean(loss)
 
+def load_calls(filename="callData.txt"):
+    t = open(filename)
+    rawdata = json.load(t)
+    # agentCalls and callerCalls are lists of strings, with the strings containing all words spoken by agent/caller
+    agentCalls = []
+    callerCalls = []
+    labelCalls = []
+    for call in rawdata:
+        totAgentWords = ''
+        totCallerWords = ''
+        for utterance in call['caller']:
+            totCallerWords += utterance['transcript'] + ' '
+        for utterance in call['agent']:
+            totAgentWords += utterance['transcript'] + ' '
+        agentCalls += [totAgentWords]
+        callerCalls += [totCallerWords]
+        labelCalls += [call['label']]
+    vectorizer = CountVectorizer(min_df=1)
+    X = vectorizer.fit_transform(agentCalls)
+    Y = vectorizer.fit_transform(callerCalls)
+    X = X[:,:28*28/2]
+    Y = Y[:,:28*28/2]
+    le = preprocessing.LabelEncoder()
+#    le.fit(labelCalls)
+#    labels= le.transform(labelCalls)
+    labels = le.fit_transform(labelCalls)
+#    return numpy.hstack((X.toarray(), Y.toarray())), labels
+    # Let's do this smarter
+    #tfCaller = TfidfVectorizer(min_df=0.1, max_df=0.9, max_features=int(28*2*28*2/2), ngram_range=(1, 3))
+    tfCaller = TfidfVectorizer(max_features=int(28*2*28*2/2), ngram_range=(1, 3))
+    tfCaller.fit(callerCalls)
+    tfCallerMatrix = tfCaller.fit_transform(callerCalls)
+    #tfAgent = TfidfVectorizer(min_df=0.1, max_df=0.9, max_features=int(28*2*28*2/2), ngram_range=(1, 3))
+    tfAgent = TfidfVectorizer(max_features=int(28*2*28*2/2), ngram_range=(1, 3))
+    tfAgent.fit(agentCalls)
+    tfAgentMatrix = tfAgent.fit_transform(agentCalls)
+    return tfCaller, tfCallerMatrix, tfAgent, tfAgentMatrix, labels
+
+ #labelencoder
+def aspen(layers, #pylint: disable=invalid-name
+          activation="sigmoid",
+          batch_size=128,
+          mode="train"):
+    """Mnist classification with a multi-layer perceptron."""
+
+    if activation == "sigmoid":
+        activation_op = tf.sigmoid
+    elif activation == "relu":
+        activation_op = tf.nn.relu
+    else:
+        raise ValueError("{} activation not supported".format(activation))
+
+    # Data.
+    tfCaller, tfCallerMatrix, tfAgent, tfAgentMatrix, callLabels = load_calls()
+    print("tfCallerMatrix:")
+    print(tfCallerMatrix)
+    print(tfCallerMatrix.shape)
+    input("Press enter to continue")
+    print("tfAgentMatrix:")
+    print(tfAgentMatrix)
+    print(tfAgentMatrix.shape)
+    input("Press enter to continue")
+
+    #data = mnist_dataset.load_mnist()
+    #data = getattr(data, mode)
+    callData = numpy.hstack((tfCallerMatrix.toarray(), tfAgentMatrix.toarray()))
+    images = tf.constant(callData, dtype=tf.float32, name="CDK_transcripts")
+    # Vocab is 392 words for agent, 392 for caller.  Don't reshape.
+    images = tf.reshape(images, [-1, 28*2, 28*2, 1])
+    labels = tf.constant(callLabels, dtype=tf.int64, name="CDK_labels")
+
+    # Network.
+    mlp = snt.nets.MLP(list(layers) + [3],
+                       activation=activation_op,
+                       initializers=_nn_initializers)
+    network = snt.Sequential([snt.BatchFlatten(), mlp])
+
+    def build():
+        indices = tf.random_uniform([batch_size], 0, callData.shape[0], tf.int64)
+        batch_images = tf.gather(images, indices)
+        batch_labels = tf.gather(labels, indices)
+        output = network(batch_images)
+        return _xent_loss(output, batch_labels)
+
+    return build
 
 def mnist(layers,  # pylint: disable=invalid-name
           activation="sigmoid",
@@ -157,6 +248,9 @@ def mnist(layers,  # pylint: disable=invalid-name
   images = tf.constant(data.images, dtype=tf.float32, name="MNIST_images")
   images = tf.reshape(images, [-1, 28, 28, 1])
   labels = tf.constant(data.labels, dtype=tf.int64, name="MNIST_labels")
+
+  print("labels shape:")
+  print(labels.shape)
 
   # Network.
   mlp = snt.nets.MLP(list(layers) + [10],
